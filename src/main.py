@@ -20,7 +20,7 @@ from pathlib import Path
 from src.config import load_settings
 
 # ── Tracker imports ───────────────────────────────────────────────────────────
-from src.trackers.itunes import ITunesTracker
+from src.trackers.podcast_index import PodcastIndexTracker
 
 # ── Notifier imports ──────────────────────────────────────────────────────────
 from src.notifiers.telegram import TelegramNotifier
@@ -61,7 +61,7 @@ def _save_seen(path: Path, seen_ids: set[str]) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    """Run the full tracker → notifier pipeline."""
+    """Run the full tracker -> notifier pipeline."""
 
     # 1. Load configuration
     try:
@@ -76,7 +76,7 @@ def main() -> None:
     # REGISTRY — add new trackers / notifiers here
     # ──────────────────────────────────────────────────────────────────────
     trackers = [
-        ITunesTracker(settings),
+        PodcastIndexTracker(settings),
         # FutureTracker(settings),
     ]
 
@@ -100,7 +100,7 @@ def main() -> None:
     if not all_new_items:
         logger.info("No new items found. Nothing to notify.")
     else:
-        logger.info("Collected %d new item(s). Sending notifications…", len(all_new_items))
+        logger.info("Collected %d new item(s). Sending notifications...", len(all_new_items))
 
     # 4. Notify through all channels
     for notifier in notifiers:

@@ -22,6 +22,8 @@ load_dotenv(_env_path)
 
 
 _REQUIRED_VARS = [
+    "PODCAST_INDEX_API_KEY",
+    "PODCAST_INDEX_API_SECRET",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
 ]
@@ -31,6 +33,8 @@ _REQUIRED_VARS = [
 class Settings:
     """Immutable container for all application settings."""
 
+    podcast_index_api_key: str
+    podcast_index_api_secret: str
     telegram_bot_token: str
     telegram_chat_id: str
 
@@ -50,7 +54,7 @@ def load_settings() -> Settings:
     missing = [v for v in _REQUIRED_VARS if not os.getenv(v)]
     if missing:
         print(
-            f"[CONFIG] ❌ Missing required environment variables: {', '.join(missing)}",
+            f"[CONFIG] Missing required environment variables: {', '.join(missing)}",
             file=sys.stderr,
         )
         raise EnvironmentError(
@@ -58,6 +62,8 @@ def load_settings() -> Settings:
         )
 
     return Settings(
+        podcast_index_api_key=os.environ["PODCAST_INDEX_API_KEY"],
+        podcast_index_api_secret=os.environ["PODCAST_INDEX_API_SECRET"],
         telegram_bot_token=os.environ["TELEGRAM_BOT_TOKEN"],
         telegram_chat_id=os.environ["TELEGRAM_CHAT_ID"],
     )

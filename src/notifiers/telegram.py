@@ -69,11 +69,17 @@ class TelegramNotifier(BaseNotifier):
         url = item.get("url", "")
         person = item.get("person", "Unknown")
 
+        podcast = item.get("podcast", "")
+
         lines = [
             f"🎙️ <b>{_escape_html(title)}</b>",
+        ]
+        if podcast:
+            lines.append(f"📡 Podcast: {_escape_html(podcast)}")
+        lines.extend([
             f"👤 Matched: {_escape_html(person)}",
             f"⏱️ Duration: {duration_str}",
-        ]
+        ])
         if url:
             lines.append(f'🔗 <a href="{url}">Listen here</a>')
 
