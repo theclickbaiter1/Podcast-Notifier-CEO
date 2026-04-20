@@ -1,15 +1,20 @@
 """
 Podcast Index tracker.
 
-Searches the Podcast Index API for podcast feeds matching notable
-tech / AI CEOs, then fetches their recent episodes and filters by
-duration to find long-form appearances.
+Two modes of discovery:
+  1. **CEO Search** — find feeds mentioning Whale CEOs, fetch recent episodes.
+  2. **Curated AI Podcasts** — monitor a hand-picked list of top-tier tech/AI
+     podcasts for any new episodes.
+
+Both modes filter by recency (25 hours) and duration (25+ minutes), and apply
+a quality filter to discard AI-generated slop and clip channels.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from typing import Any
 
@@ -19,8 +24,7 @@ from src.trackers.base_tracker import BaseTracker
 
 logger = logging.getLogger(__name__)
 
-# ── Target names to search for ───────────────────────────────────────────────
-# Add or remove names here to change who is tracked.
+# ── Target CEO names ─────────────────────────────────────────────────────────
 WHALE_CEOS: list[str] = [
     "Elon Musk",
     "Jensen Huang",
@@ -35,24 +39,60 @@ WHALE_CEOS: list[str] = [
     "Lisa Su",
 ]
 
-# Minimum episode duration in seconds (25 minutes).
-MIN_DURATION_SECONDS = 1500
+# ── Curated high-quality AI / tech podcasts (by feed title search) ───────────
+# We search for these by name to get their feed IDs, then pull recent episodes.
+CURATED_AI_PODCASTS: list[str] = [
+    "Lex Fridman Podcast",
+    "All-In Podcast",
+    "Hard Fork",
+    "The Logan Bartlett Show",
+    "No Priors: Artificial Intelligence",
+    "Dwarkesh Podcast",
+    "Eye on AI",
+    "Latent Space: The AI Engineer Podcast",
+    "Gradient Dissent",
+    "Practical AI",
+    "The AI Podcast",              # NVIDIA's podcast
+    "This Week in Machine Learning",
+    "Machine Learning Street Talk",
+    "The Twenty Minute VC",
+    "Acquired",
+    "BG2Pod with Brad Gerstner and Bill Gurley",
+]
 
-# Only look at episodes published in the last N days.
-MAX_AGE_DAYS = 7
+# ── Filtering constants ──────────────────────────────────────────────────────
+MIN_DURATION_SECONDS = 1500      # 25 minutes
+MAX_AGE_SECONDS = 25 * 3600     # 25 hours — one daily run + 1h buffer
+
+# How many feeds to inspect per CEO search term.
+MAX_FEEDS_PER_SEARCH = 5
+
+# ── Slop / low-quality content patterns (case-insensitive) ───────────────────
+_SLOP_PATTERNS = re.compile(
+    r"|".join([
+        r"\bai[\s-]*generated\b",
+        r"\bai[\s-]*narrated\b",
+        r"\bai[\s-]*voice\b",
+        r"\btext[\s-]*to[\s-]*speech\b",
+        r"\btts\b",
+        r"\b(shorts?|clip|highlight|teaser|preview|trailer)\b",
+        r"\breupload\b",
+        r"\bre[\s-]*upload\b",
+        r"\bfan[\s-]*made\b",
+        r"\bunofficial\b",
+        r"\bcompilation\b",
+        r"\b#\d+\s*-?\s*#\d+\b",   # "Episode #1 - #50" compilation patterns
+    ]),
+    re.IGNORECASE,
+)
 
 API_BASE_URL = "https://api.podcastindex.org/api/1.0"
-
-# How many feeds to inspect per CEO (the most relevant ones).
-MAX_FEEDS_PER_CEO = 5
 
 
 class PodcastIndexTracker(BaseTracker):
     """
-    Two-step search:
-      1. ``/search/byterm`` → find podcast **feeds** mentioning the CEO.
-      2. ``/episodes/byfeedid``  → fetch recent **episodes** from each feed.
-    Then filter by duration and deduplicate.
+    Discovers new podcast episodes via CEO name search and curated feed
+    monitoring, then filters for quality and recency.
     """
 
     def __init__(self, settings: Any) -> None:
@@ -74,69 +114,98 @@ class PodcastIndexTracker(BaseTracker):
 
     # ── Public interface ──────────────────────────────────────────────────
     def fetch_new_items(self, seen_ids: set[str]) -> list[dict]:
+        since = int(time.time()) - MAX_AGE_SECONDS
         new_items: list[dict] = []
-        since = int(time.time()) - (MAX_AGE_DAYS * 86400)
+        seen_ep_ids: set[str] = set()  # local dedup within this run
 
+        # ── Mode 1: CEO name search ──────────────────────────────────────
         for person in WHALE_CEOS:
-            logger.info("Searching Podcast Index for: %s", person)
-
-            # Step 1 — find feeds mentioning this CEO
+            logger.info("Searching for CEO: %s", person)
             try:
                 feeds = self._search_feeds(person)
             except requests.RequestException as exc:
                 logger.warning("Feed search error for '%s': %s", person, exc)
                 continue
 
-            # Step 2 — for each feed, get recent episodes
-            for feed in feeds[:MAX_FEEDS_PER_CEO]:
-                feed_id = feed.get("id")
-                if not feed_id:
-                    continue
+            for feed in feeds[:MAX_FEEDS_PER_SEARCH]:
+                self._collect_episodes(
+                    feed, since, seen_ids, seen_ep_ids, new_items,
+                    tag=person,
+                )
+                time.sleep(0.3)
+            time.sleep(0.5)
 
-                try:
-                    episodes = self._get_episodes(feed_id, since)
-                except requests.RequestException as exc:
-                    logger.warning("Episode fetch error (feed %s): %s", feed_id, exc)
-                    continue
+        # ── Mode 2: Curated AI/tech podcasts ─────────────────────────────
+        for podcast_name in CURATED_AI_PODCASTS:
+            logger.info("Checking curated podcast: %s", podcast_name)
+            try:
+                feeds = self._search_feeds(podcast_name)
+            except requests.RequestException as exc:
+                logger.warning("Feed search error for '%s': %s", podcast_name, exc)
+                continue
 
-                for ep in episodes:
-                    ep_id = str(ep.get("id", ""))
-                    duration = ep.get("duration", 0) or 0
+            # Take only the top match (most relevant)
+            if feeds:
+                self._collect_episodes(
+                    feeds[0], since, seen_ids, seen_ep_ids, new_items,
+                    tag="AI/Tech",
+                )
+            time.sleep(0.5)
 
-                    if ep_id in seen_ids:
-                        continue
-
-                    if duration < MIN_DURATION_SECONDS:
-                        logger.debug(
-                            "Skipping short episode (%ds): %s",
-                            duration,
-                            ep.get("title", ""),
-                        )
-                        continue
-
-                    new_items.append(
-                        {
-                            "id": ep_id,
-                            "title": ep.get("title", "Untitled"),
-                            "url": ep.get("link")
-                            or ep.get("enclosureUrl", ""),
-                            "description": ep.get("description", ""),
-                            "duration": duration,
-                            "person": person,
-                            "podcast": feed.get("title", ""),
-                        }
-                    )
-
-                time.sleep(0.3)  # rate-limit between episode fetches
-
-            time.sleep(0.5)  # rate-limit between CEO searches
-
-        logger.info("Found %d new episode(s) across all CEOs.", len(new_items))
+        logger.info("Found %d new episode(s) total.", len(new_items))
         return new_items
 
     # ── Private helpers ───────────────────────────────────────────────────
+    def _collect_episodes(
+        self,
+        feed: dict,
+        since: int,
+        seen_ids: set[str],
+        seen_ep_ids: set[str],
+        out: list[dict],
+        tag: str,
+    ) -> None:
+        """Fetch recent episodes from a feed and append qualifying ones."""
+        feed_id = feed.get("id")
+        if not feed_id:
+            return
+
+        try:
+            episodes = self._get_episodes(feed_id, since)
+        except requests.RequestException as exc:
+            logger.warning("Episode fetch error (feed %s): %s", feed_id, exc)
+            return
+
+        for ep in episodes:
+            ep_id = str(ep.get("id", ""))
+            duration = ep.get("duration", 0) or 0
+            title = ep.get("title", "")
+
+            # Skip dups (already notified, or already found this run)
+            if ep_id in seen_ids or ep_id in seen_ep_ids:
+                continue
+
+            # Skip short clips
+            if duration < MIN_DURATION_SECONDS:
+                continue
+
+            # Skip AI slop / low-quality content
+            if _is_slop(title, ep.get("description", "")):
+                logger.debug("Filtered slop: %s", title)
+                continue
+
+            seen_ep_ids.add(ep_id)
+            out.append({
+                "id": ep_id,
+                "title": title or "Untitled",
+                "url": ep.get("link") or ep.get("enclosureUrl", ""),
+                "description": ep.get("description", ""),
+                "duration": duration,
+                "person": tag,
+                "podcast": feed.get("title", ""),
+            })
+
     def _search_feeds(self, term: str) -> list[dict]:
-        """``/search/byterm`` → list of podcast feeds."""
         resp = requests.get(
             f"{API_BASE_URL}/search/byterm",
             params={"q": term},
@@ -147,12 +216,17 @@ class PodcastIndexTracker(BaseTracker):
         return resp.json().get("feeds", [])
 
     def _get_episodes(self, feed_id: int, since: int) -> list[dict]:
-        """``/episodes/byfeedid`` → recent episodes for a feed."""
         resp = requests.get(
             f"{API_BASE_URL}/episodes/byfeedid",
-            params={"id": feed_id, "since": since, "max": 20},
+            params={"id": feed_id, "since": since, "max": 10},
             headers=self._auth_headers(),
             timeout=30,
         )
         resp.raise_for_status()
         return resp.json().get("items", [])
+
+
+def _is_slop(title: str, description: str) -> bool:
+    """Return True if the episode looks like AI-generated or reused content."""
+    text = f"{title} {description}"
+    return bool(_SLOP_PATTERNS.search(text))
